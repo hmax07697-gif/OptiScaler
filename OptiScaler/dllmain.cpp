@@ -1464,6 +1464,12 @@ DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
 
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
 
+    // The extra pacing exists for the non-Intel path where the provider's own pacing does not engage,
+    // so default it off on a native Intel adapter. A separate statement on purpose: it must not sit
+    // between the AMD check and the `else if` below, or that branch changes meaning
+    if (primaryGpu.vendorId == VendorId::Intel && !Config::Instance()->FGXeFGExtraPacing.has_value())
+        Config::Instance()->FGXeFGExtraPacing.set_volatile_value(false);
+
     // We don't yet know if the GPU supports FSR 4 so hook any AMD
     if (primaryGpu.vendorId == VendorId::AMD)
         Amdxc64Hooks::Init();

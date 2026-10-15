@@ -816,7 +816,19 @@ void InitNGXParameters(NVSDK_NGX_Parameter* InParams, API api)
         if (State::Instance().activeFgNvngx != FGNvngxReplacement::None)
             countMax = std::max(1, Nvngx_FG::getMaxFakeFramesCount());
         else
+        {
             InParams->Get("DLSSG.MultiFrameCountMax", &countMax);
+
+            // With XeFG as the output it is OptiScaler's own backend that decides how many frames can be
+            // generated, and XeFG's ceiling (raised by the MFG unlock) is what the game should be offered
+            if (State::Instance().activeFgOutput == FGOutput::XeFG)
+            {
+                if (auto fg = State::Instance().CurrentFG(); fg != nullptr)
+                    countMax = std::max(countMax, fg->GetMaxInterpolationCount());
+                else
+                    countMax = std::max(countMax, Config::Instance()->FGXeFGMaxInterpolatedFrames.value_or_default());
+            }
+        }
 
         InParams->Set("DLSSG.MultiFrameCountMax", countMax);
 

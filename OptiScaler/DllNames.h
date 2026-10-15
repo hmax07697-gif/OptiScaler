@@ -134,6 +134,7 @@ DEFINE_NAME_VECTORS(slCommon, "sl.common");
 
 DEFINE_NAME_VECTORS(xess, "libxess");
 DEFINE_NAME_VECTORS(xessDx11, "libxess_dx11");
+DEFINE_NAME_VECTORS(xessfg, "igxess_fg");
 DEFINE_NAME_VECTORS(xefg, "libxess_fg");
 
 DEFINE_NAME_VECTORS(fsr2, "ffx_fsr2_api_x64");
