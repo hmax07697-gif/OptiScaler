@@ -1,31 +1,24 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
+# Builds this fork of OptiScaler on GitHub's Windows runners and publishes the result.
+#
+# Put this file at .github/workflows/build-fork.yml in your fork.
+# Runs when you push to a branch named xefg-* (or master), or by hand from the Actions tab.
+# Needs no secrets: it uses the GITHUB_TOKEN that GitHub provides automatically.
+#
+# Built from the steps in upstream's just_build_no_signature.yml / build.yml.
 
-name: Scheduled Build
+name: Build fork
 
 on:
-  schedule:
-    - cron: '0 4 * * *' 
-
   workflow_dispatch:
-#  push:
-#    branches: [ "master" ]
-#  pull_request:
-#    branches: [ "master" ]
-    
-env:
-  # Path to the solution file relative to the root of the project.
-  SOLUTION_FILE_PATH: .
+  push:
+    branches: [ "master", "xefg-*" ]
 
-  # Configuration type to build.
-  # You can convert this to a build matrix if you need coverage of multiple configuration types.
-  # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+env:
+  SOLUTION_FILE_PATH: .
   BUILD_CONFIGURATION: Release
 
 permissions:
-  contents: write
+  contents: write   # needed to create the release
 
 jobs:
   build:
@@ -34,194 +27,66 @@ jobs:
     steps:
     - uses: actions/checkout@v6
       with:
-        fetch-depth: 0            
         submodules: 'true'
-        
-    - name: Check Existing Release
-      id: check_release
-      uses: actions/github-script@v8
-      with:
-        script: |
-          const releaseTag = "nightly";
-          try {
-            const release = await github.rest.repos.getReleaseByTag({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag: releaseTag,
-            });
-            core.setOutput("release_exists", true);
-            core.setOutput("release_id", release.data.id);
-            core.setOutput("upload_url", release.data.upload_url);
-          } catch (error) {
-            if (error.status === 404) {
-              core.setOutput("release_exists", false);
-            } else {
-              throw error;
-            }
-          }
 
-    - name: Create Nightly Release (if not exists)
-      id: create_release
-      if: steps.check_release.outputs.release_exists == 'false'
-      uses: actions/github-script@v8
-      with:
-        script: |
-          const release = await github.rest.repos.createRelease({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            tag_name: "nightly",
-            name: "Nightly Builds",
-            body: "This is an automated nightly build release.",
-            draft: false,
-            prerelease: true,
-          });
-          core.setOutput("release_id", release.data.id);
-          core.setOutput("upload_url", release.data.upload_url);
-       
-    - name: Extract OptiScaler Version
+    - name: Work out the file name
       id: get_version
-      working-directory: ${{ github.workspace }}
       shell: powershell
       run: |
-        # Ensure the file exists before proceeding
         $resourceFile = ".\OptiScaler\resource.h"
-        if (-Not (Test-Path $resourceFile)) {
-            Write-Error "File not found: $resourceFile"
-            exit 1
-        }
-        
-        # Helper function to extract the first matching line for a version component
+        if (-Not (Test-Path $resourceFile)) { Write-Error "File not found: $resourceFile"; exit 1 }
+
         function Get-Version-Component {
-            param (
-                [string]$pattern,
-                [string]$replacement
-            )
-            # Use Select-String and take only the first match
+            param ([string]$pattern, [string]$replacement)
             $line = Get-Content $resourceFile | Select-String -Pattern $pattern | Select-Object -First 1
-            if ($line) {
-                return ($line.Line -replace $replacement).Trim()
-            } else {
-                Write-Error "Pattern not found: $pattern"
-                exit 1
-            }
+            if ($line) { return ($line.Line -replace $replacement).Trim() }
+            Write-Error "Pattern not found: $pattern"; exit 1
         }
-        
-        # Extract version components (only the first match for each pattern)
-        $majorVersion = Get-Version-Component 'VER_MAJOR_VERSION' '#define VER_MAJOR_VERSION\s+'
-        $minorVersion = Get-Version-Component 'VER_MINOR_VERSION' '#define VER_MINOR_VERSION\s+'
-        $hotfixVersion = Get-Version-Component 'VER_HOTFIX_VERSION' '#define VER_HOTFIX_VERSION\s+'
-        $buildVersion = Get-Version-Component 'VER_BUILD_NUMBER' '#define VER_BUILD_NUMBER\s+'
-        
-        # Merge into a single version string
-        $version = "v$majorVersion.$minorVersion.$hotfixVersion-pre$buildVersion"
-        
-        # Get the current date in a specific format (e.g., YYYYMMDD)
-        $date = Get-Date -Format "yyyyMMdd"
-        
-        # Construct the output filename with version and date
-        $outputFileName = "OptiScaler_${version}_${date}"
-        
-        # Output the generated filename
-        Write-Output "Generated Filename: $outputFileName"
-        
-        # Write outputs to GITHUB_OUTPUT
-        "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-        "filename=$outputFileName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-        
-      continue-on-error: false
-      
-    - name: Debug Outputs
-      run: |
-        echo "Version: ${{ steps.get_version.outputs.version }}"
-        echo "Filename: ${{ steps.get_version.outputs.filename }}"
-        
+
+        $major  = Get-Version-Component 'VER_MAJOR_VERSION'  '#define VER_MAJOR_VERSION\s+'
+        $minor  = Get-Version-Component 'VER_MINOR_VERSION'  '#define VER_MINOR_VERSION\s+'
+        $hotfix = Get-Version-Component 'VER_HOTFIX_VERSION' '#define VER_HOTFIX_VERSION\s+'
+        $build  = Get-Version-Component 'VER_BUILD_NUMBER'   '#define VER_BUILD_NUMBER\s+'
+
+        $version = "v$major.$minor.$hotfix-pre$build"
+        $date    = Get-Date -Format "yyyyMMdd"
+        $name    = "OptiScaler_${version}_xefg_${date}_${{ github.run_number }}"
+
+        "version=$version"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "filename=$name"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        Write-Output "Building $name"
+
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v3
 
     - name: Build
-      working-directory: ${{env.GITHUB_WORKSPACE}}
-      # Add additional options to the MSBuild command line here (like platform or verbosity level).
-      # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
-      run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}} /verbosity:minimal
-      
-    - name: Compress the artifact 
+      run: msbuild /m /p:Configuration=${{ env.BUILD_CONFIGURATION }} ${{ env.SOLUTION_FILE_PATH }} /verbosity:minimal
+
+    - name: Compress the build
       run: |
         $zipName = "${{ steps.get_version.outputs.filename }}.7z"
         7z a -r ${{ github.workspace }}\$zipName ${{ github.workspace }}\x64\Release\a\*.*
 
-      continue-on-error: false
-        
+    # Kept for 90 days on the run page, handy for quick tests
     - uses: actions/upload-artifact@v7.0.0
       with:
-        name: ${{ steps.get_version.outputs.filename }}
-        path: ${{ github.workspace }}\${{ steps.get_version.outputs.filename }}.7z
-        compression-level: 0
+        name: '${{ steps.get_version.outputs.filename }}'
+        path: '${{ github.workspace }}\${{ steps.get_version.outputs.filename }}.7z'
         archive: false
+        compression-level: 0
         if-no-files-found: error
-       
-   # - name: Remove Previous Artifacts
-   #    if: steps.check_release.outputs.release_exists == 'true'
-   #    uses: actions/github-script@v8
-   #    with:
-   #      script: |
-   #        const releaseId = ${{ steps.check_release.outputs.release_id }};
-   #        const assets = await github.rest.repos.listReleaseAssets({
-   #          owner: context.repo.owner,
-   #          repo: context.repo.repo,
-   #          release_id: releaseId,
-   #        });
 
-   #        for (const asset of assets.data) {
-   #          await github.rest.repos.deleteReleaseAsset({
-   #            owner: context.repo.owner,
-   #            repo: context.repo.repo,
-   #            asset_id: asset.id,
-   #          });
-   #          console.log(`Deleted asset: ${asset.name}`);
-   #        }
-
-    - name: Upload Artifact to Release
+    # Permanent download on the Releases page
+    - name: Publish release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: nightly
+        tag_name: xefg-${{ github.run_number }}
+        name: ${{ steps.get_version.outputs.filename }}
+        prerelease: true
+        target_commitish: ${{ github.sha }}
+        body: |
+          Build of ${{ github.repository }} at ${{ github.sha }}
+          (branch ${{ github.ref_name }}).
         files: ${{ github.workspace }}/${{ steps.get_version.outputs.filename }}.7z
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            
-    - name: Get Commit Messages From Last Day and Update the Release
-      id: commit_messages
-      working-directory: ${{ github.workspace }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      shell: powershell
-      run: |
-        Write-Output "Fetching commits from the last 24 hours..."
-
-        # Get commit messages excluding .yml file commits
-        $commits = git log --since="1 day ago" --pretty=format:"%h %s (%an)" --abbrev-commit --no-merges --first-parent
-        
-        $commits = $commits -split "`n"
-
-        # If no commits are found, cancel the workflow
-        if (-not $commits) {          
-          Write-Output "No relevant commits in the last 24 hours. Cancelling workflow."
-
-          $ReleaseTag = "nightly"
-          Write-Output "Updating existing release: $ReleaseTag"
-          gh release edit $ReleaseTag --notes "### Changes in the Last 24 Hours`n`nNo changes..."   
-        }
-        else {
-          # Join commits into a newline-separated string
-          $formattedCommits = $commits -join "`n"        
-          Write-Output "Commits: $formattedCommits`n"
-  
-          # Generate release notes
-          $releaseNotes = "### Changes in the Last 24 Hours`n`n$formattedCommits"
-          
-          $ReleaseTag = "nightly"
-          Write-Output "Updating existing release: $ReleaseTag"
-          gh release edit $ReleaseTag --notes "$ReleaseNotes"   
-        }
-        
-      continue-on-error: false
-        
