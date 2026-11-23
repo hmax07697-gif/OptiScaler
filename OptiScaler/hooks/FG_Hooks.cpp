@@ -162,8 +162,10 @@ static bool CheckForFGStatus()
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
     }
 
-    // The flip meter output only presents, its frames come from a Nvngx replacement
-    else if (State::Instance().activeFgOutput == FGOutput::FlipMeter && !Nvngx_FG::isDx12Available())
+    // The flip meter output only presents, its frames come from a Nvngx replacement or XeFG's internal API
+    else if (State::Instance().activeFgOutput == FGOutput::FlipMeter &&
+             Config::Instance()->FGFlipMeterGenerator.value_or_default() != FlipMeterGenerator::XeFG &&
+             !Nvngx_FG::isDx12Available())
     {
         ImGui::InsertNotification(
             { ImGuiToastType::Error, 20000, "Can't init Flip Meter Output\nNo usable FG Nvngx Replacement selected" });

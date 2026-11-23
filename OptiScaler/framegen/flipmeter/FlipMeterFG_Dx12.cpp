@@ -360,11 +360,8 @@ void FlipMeterFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConst
 
 void FlipMeterFG_Dx12::ReleaseFeature()
 {
-    if (UseXeFG())
-    {
-        ReleaseXeFG();
-        return;
-    }
+    // Either one can be alive, switching the generator in the menu leaves the other behind
+    ReleaseXeFG();
 
     if (_handle != nullptr)
     {

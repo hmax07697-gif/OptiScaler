@@ -6063,6 +6063,30 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         RenderFGModeSlider(ctx, "Frame Gen##flipmeter", flipMeter != nullptr ? flipMeter->MaxInterpolationCount() : 1,
                            &config->FGFlipMeterInterpolationCount);
 
+        // What generates the frames, the proxy only presents them
+        // clang-format off
+        static std::vector<MenuOption<FlipMeterGenerator>> generatorOptions = {
+            { FlipMeterGenerator::Nvngx, "Nvngx Replacement",
+              "Frames come from the selected FG Nvngx Replacement" },
+            { FlipMeterGenerator::XeFG, "XeFG",
+              "Intel's XeFG through its unexported internal API\n"
+              "Needs libxess_fg.dll 1.3.1 (XeSS SDK 3.0.2) or 1.3.4 next to the game,\n"
+              "in OptiScaler's folder or in OptiScaler\\xess" }
+        };
+        // clang-format on
+
+        // need to have a value before combo
+        if (!config->FGFlipMeterGenerator.has_value())
+            config->FGFlipMeterGenerator = config->FGFlipMeterGenerator.value_or_default();
+
+        const auto generator = config->FGFlipMeterGenerator.value_or_default();
+        PopulateCombo("Generator##flipmeter", config->FGFlipMeterGenerator, generatorOptions);
+        ShowTooltip("What generates the frames that the driver flip meters present\n"
+                    "The Nvngx Replacement is unused when XeFG generates them");
+
+        if (generator != config->FGFlipMeterGenerator.value_or_default())
+            LOG_DEBUG("Flip Meter generator: {}", (UINT) config->FGFlipMeterGenerator.value_or_default());
+
         if (swapChain != nullptr)
         {
             const auto status = swapChain->GetStatus();
