@@ -706,6 +706,17 @@ Dx12Resource FlipMeterFG_Dx12::FloatDepth(ID3D12GraphicsCommandList* cmdList, Dx
     return result;
 }
 
+// XeFG's own log. Its warnings and errors explain why Execute returns what it does, the rest is debug only
+static void XeFGLogCallback(const char* message, uint32_t level, void*)
+{
+    if (level == XeFGInternal::LOG_LEVEL_ERROR)
+        LOG_ERROR("XeFG: {}", message);
+    else if (level == XeFGInternal::LOG_LEVEL_WARNING)
+        LOG_WARN("XeFG: {}", message);
+    else
+        LOG_DEBUG("XeFG: {}", message);
+}
+
 // XeFG's unexported internal API: the generated frames are written into the proxy's generated buffers and the
 // proxy presents them with AMD's driver flip metering, so XeFG's own swap chain and pacer are never created.
 bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
@@ -751,6 +762,8 @@ bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
         _xefgFailed = true;
         return false;
     }
+
+    XeFGInternal::SetLoggingCallback(context, XeFGInternal::LOG_LEVEL_INFO, XeFGLogCallback);
 
     XeFGInternal::InitParams params {};
     params.outputResolution = { (uint32_t) desc.Width, (uint32_t) desc.Height };
@@ -965,6 +978,10 @@ bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fInd
     frame.data.motionVectorScale[0] = _mvScaleX[fIndex] == 0.0f ? 1.0f : _mvScaleX[fIndex];
     frame.data.motionVectorScale[1] = _mvScaleY[fIndex] == 0.0f ? 1.0f : _mvScaleY[fIndex];
     frame.data.resetHistory = _reset[fIndex] != 0 && !Config::Instance()->FGSkipReset.value_or_default() ? 1 : 0;
+
+    // How long the real frame took in ms, XeFG uses it for its own timing
+    frame.data.frameRenderTime = (float) _ftDelta[fIndex];
+
     frame.valid = true;
 
     // XeFG needs both frames of a pair, and either both or neither with a hudless image

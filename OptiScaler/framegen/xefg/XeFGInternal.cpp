@@ -16,6 +16,7 @@ using PfnCreateContext = XeFGInternal::result_t (*)(ID3D12Device*, void**);
 using PfnInit = XeFGInternal::result_t (*)(void*, const XeFGInternal::InitParams*);
 using PfnExecute = XeFGInternal::result_t (*)(void*, ID3D12GraphicsCommandList*, const XeFGInternal::ExecParams*);
 using PfnDestroy = XeFGInternal::result_t (*)(void*);
+using PfnSetLoggingCallback = XeFGInternal::result_t (*)(void*, uint32_t, XeFGInternal::LogCallback, void*);
 using PfnSettings = uint8_t* (*)();
 
 // Offsets into the XefgSettings singleton, per build
@@ -36,14 +37,14 @@ struct KnownBuild
 {
     uint32_t timeDateStamp;
     uint32_t sizeOfImage;
-    uint32_t createContext, init, execute, destroy, settings;
+    uint32_t createContext, init, execute, destroy, settings, setLoggingCallback;
     const SettingsLayout* layout;
 };
 
 // libxess_fg.dll 1.3.1 (XeSS SDK 3.0.2) and 1.3.4, as documented by dlssg-to-xefg (GPL-3.0)
 constexpr KnownBuild KnownBuilds[] = {
-    { 0x69CB0F4D, 0x015ED000, 0x1853B0, 0x1871C0, 0x185800, 0x1874C0, 0x1A4610, &Layout_1_3_1 },
-    { 0x6A95ED0F, 0x015D7000, 0x1856A0, 0x1874B0, 0x185AF0, 0x1877B0, 0x1A4EA0, &Layout_1_3_4 },
+    { 0x69CB0F4D, 0x015ED000, 0x1853B0, 0x1871C0, 0x185800, 0x1874C0, 0x1A4610, 0x188060, &Layout_1_3_1 },
+    { 0x6A95ED0F, 0x015D7000, 0x1856A0, 0x1874B0, 0x185AF0, 0x1877B0, 0x1A4EA0, 0x188350, &Layout_1_3_4 },
 };
 
 struct Api
@@ -52,6 +53,7 @@ struct Api
     PfnInit init = nullptr;
     PfnExecute execute = nullptr;
     PfnDestroy destroy = nullptr;
+    PfnSetLoggingCallback setLoggingCallback = nullptr;
 
     uint8_t* settings = nullptr;
     const SettingsLayout* layout = nullptr;
@@ -126,6 +128,7 @@ bool Resolve(HMODULE module)
     api.init = reinterpret_cast<PfnInit>(base + known->init);
     api.execute = reinterpret_cast<PfnExecute>(base + known->execute);
     api.destroy = reinterpret_cast<PfnDestroy>(base + known->destroy);
+    api.setLoggingCallback = reinterpret_cast<PfnSetLoggingCallback>(base + known->setLoggingCallback);
     api.layout = known->layout;
 
     auto settingsInstance = reinterpret_cast<PfnSettings>(base + known->settings);
@@ -276,5 +279,13 @@ void Destroy(void* context)
         return;
 
     api.destroy(context);
+}
+
+void SetLoggingCallback(void* context, uint32_t level, LogCallback callback)
+{
+    if (api.setLoggingCallback == nullptr || context == nullptr || callback == nullptr)
+        return;
+
+    api.setLoggingCallback(context, level, callback, nullptr);
 }
 } // namespace XeFGInternal

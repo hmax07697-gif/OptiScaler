@@ -27,6 +27,18 @@ using result_t = int32_t;
 constexpr result_t RESULT_SUCCESS = 0;
 constexpr result_t RESULT_ERROR_NOT_IMPLEMENTED = -7;
 
+// Log levels and the callback XeFG reports through, the same values as xefgd_logging_level_t
+enum LogLevel : uint32_t
+{
+    LOG_LEVEL_DEBUG = 0,
+    LOG_LEVEL_INFO = 1,
+    LOG_LEVEL_WARNING = 2,
+    LOG_LEVEL_ERROR = 3
+};
+
+// Called while the context is used, message first
+using LogCallback = void (*)(const char* message, uint32_t level, void* userData);
+
 // XeFG's default network. Above one interpolated frame Init picks its multi frame network (16) instead, which
 // libxess_fg.dll doesn't ship, so this one has to be forced before CreateContext.
 constexpr int32_t DEFAULT_MODEL = 18;
@@ -153,4 +165,7 @@ bool CreateContext(ID3D12Device* device, void** context);
 result_t Init(void* context, const InitParams& params);
 result_t Execute(void* context, ID3D12GraphicsCommandList* cmdList, const ExecParams& params);
 void Destroy(void* context);
+
+// Wires XeFG's own log to the caller's, the context keeps the callback until Destroy
+void SetLoggingCallback(void* context, uint32_t level, LogCallback callback);
 } // namespace XeFGInternal
