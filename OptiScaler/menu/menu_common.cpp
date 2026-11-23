@@ -4862,9 +4862,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         config->FGOutput = FGOutput::NoFG;
         replaceFgOutputWithNvngx = true;
     }
-    else if (config->FGOutput == FGOutput::DLSSG || config->FGOutput == FGOutput::FlipMeter)
+    else if (config->FGOutput == FGOutput::DLSSG)
     {
         showNvngxFgDowndown = true;
+    }
+    else if (config->FGOutput == FGOutput::FlipMeter)
+    {
+        // XeFG generates the frames itself, the replacement isn't used at all
+        showNvngxFgDowndown = config->FGFlipMeterGenerator.value_or_default() != FlipMeterGenerator::XeFG;
     }
 
     auto constexpr fgNvngxNoneIndex = (uint32_t) FGNvngxReplacement::None;
@@ -6086,6 +6091,40 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         if (generator != config->FGFlipMeterGenerator.value_or_default())
             LOG_DEBUG("Flip Meter generator: {}", (UINT) config->FGFlipMeterGenerator.value_or_default());
+
+        if (flipMeter != nullptr && config->FGFlipMeterGenerator.value_or_default() == FlipMeterGenerator::XeFG)
+        {
+            // Resolve it before the first frame reaches the generator so the status is known while the menu is open
+            XeFGInternal::Load();
+
+            const auto xefg = flipMeter->GetXeFGStatus();
+
+            if (!xefg.available)
+            {
+                ImGui::TextColored(StatusError(), "XeFG: unavailable, %s", XeFGInternal::Status());
+                ShowTooltip("The internal API's addresses are per build, other libxess_fg versions are refused\n"
+                            "Needs libxess_fg.dll 1.3.1 (XeSS SDK 3.0.2) or 1.3.4 next to the game,\n"
+                            "in OptiScaler's folder or in OptiScaler\\xess");
+            }
+            else if (!xefg.reason.empty())
+            {
+                ImGui::TextColored(StatusError(), "XeFG: %s", xefg.reason.c_str());
+                ShowTooltip("Nothing is generated until this is fixed");
+            }
+            else if (xefg.active && xefg.requested > 0)
+            {
+                ImGui::TextColored(xefg.generated == xefg.requested ? StatusOk() : StatusWarn(),
+                                   "XeFG: %u of %u generated frames per game frame (%uX)", xefg.generated,
+                                   xefg.requested, xefg.requested + 1);
+                ShowTooltip("How many frames XeFG wrote for the last game frame\n"
+                            "Fewer than requested means its inputs are incomplete, for example no\n"
+                            "matching pair of real frames yet");
+            }
+            else
+            {
+                ImGui::TextDisabled("XeFG: %s, waiting for the first frame", XeFGInternal::Status());
+            }
+        }
 
         if (swapChain != nullptr)
         {

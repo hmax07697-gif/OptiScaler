@@ -6,13 +6,14 @@
 #include <NVNGX_Parameter.h>
 #include <shaders/format_transfer/FT_Dx12.h>
 
+#include <string>
 #include <vector>
 
 class FlipMeterSwapChain;
 
 // Frame generation output presenting through AMD's driver flip metering (FlipMeterSwapChain).
-// The generated frames come from the selected Nvngx replacement, which gets the same evaluate calls Streamline's
-// DLSSG plugin makes.
+// The generated frames come from the selected generator ([FlipMeter] Generator): an Nvngx replacement, which gets
+// the same evaluate calls Streamline's DLSSG plugin makes, or XeFG through its unexported internal API.
 class FlipMeterFG_Dx12 : public virtual IFGFeature_Dx12
 {
   private:
@@ -69,6 +70,25 @@ class FlipMeterFG_Dx12 : public virtual IFGFeature_Dx12
 
     void* _xefgContext = nullptr;
     bool _xefgFailed = false;
+
+    // Why the generator isn't producing frames, for the menu. None while it works or before it started
+    enum class XeFGError : uint8_t
+    {
+        None,
+        Unavailable,
+        NoDevice,
+        CreateContext,
+        Init,
+        Capture,
+        Execute,
+        Outputs
+    };
+
+    XeFGError _xefgError = XeFGError::None;
+    int32_t _xefgErrorCode = 0;
+    UINT _xefgGenerated = 0;
+    UINT _xefgRequested = 0;
+
     UINT64 _xefgWidth = 0;
     UINT _xefgHeight = 0;
     DXGI_FORMAT _xefgFormat = DXGI_FORMAT_UNKNOWN;
@@ -107,6 +127,19 @@ class FlipMeterFG_Dx12 : public virtual IFGFeature_Dx12
 
     // Most generated frames per game frame, limited by the replacement and the driver
     int MaxInterpolationCount() const;
+
+    // What the XeFG generator is doing, read by the menu
+    struct XeFGStatus
+    {
+        bool available = false; // the internal API resolved
+        bool active = false;    // a context is initialized for the current output
+        UINT generated = 0;     // frames the last dispatch produced
+        UINT requested = 0;     // frames it asked for
+        // Why it isn't generating, empty while it is or before it started
+        std::string reason;
+    };
+
+    XeFGStatus GetXeFGStatus() const;
 
     // Null until its swapchain is made
     const FlipMeterSwapChain* SwapChain() const { return _proxy; }

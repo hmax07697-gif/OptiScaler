@@ -148,6 +148,9 @@ bool Resolve(HMODULE module)
     api.module = module;
     auto path = Util::ModulePath(module);
 
+    // Read by the menu while the generator works, the failures above leave their reason in it
+    status = std::format("libxess_fg {}.{}.{}", version.major, version.minor, version.patch);
+
     LOG_INFO("XeFG internal API resolved: {} ({}.{}.{})", wstring_to_string(path.wstring()), version.major,
              version.minor, version.patch);
 

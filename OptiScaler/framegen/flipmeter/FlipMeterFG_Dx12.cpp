@@ -227,6 +227,51 @@ bool FlipMeterFG_Dx12::UseXeFG()
     return Config::Instance()->FGFlipMeterGenerator.value_or_default() == FlipMeterGenerator::XeFG;
 }
 
+FlipMeterFG_Dx12::XeFGStatus FlipMeterFG_Dx12::GetXeFGStatus() const
+{
+    XeFGStatus status;
+    status.available = XeFGInternal::Available();
+    status.active = _xefgContext != nullptr;
+    status.generated = _xefgGenerated;
+    status.requested = _xefgRequested;
+
+    switch (_xefgError)
+    {
+    case XeFGError::None:
+        break;
+
+    case XeFGError::Unavailable:
+        status.reason = XeFGInternal::Status();
+        break;
+
+    case XeFGError::NoDevice:
+        status.reason = "no D3D12 device";
+        break;
+
+    case XeFGError::CreateContext:
+        status.reason = "xefgD3D12CreateContext failed";
+        break;
+
+    case XeFGError::Init:
+        status.reason = std::format("Init failed: {}", _xefgErrorCode);
+        break;
+
+    case XeFGError::Capture:
+        status.reason = "input capture failed";
+        break;
+
+    case XeFGError::Execute:
+        status.reason = std::format("Execute failed: {}", _xefgErrorCode);
+        break;
+
+    case XeFGError::Outputs:
+        status.reason = "the swapchain has no generated buffer to write into";
+        break;
+    }
+
+    return status;
+}
+
 int FlipMeterFG_Dx12::ProviderMaxInterpolationCount()
 {
     // XeFG's internal Init prepares for the count it is given, 5 generated frames is 6X
@@ -671,6 +716,7 @@ bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
     if (!XeFGInternal::Load())
     {
         LOG_WARN("XeFG generator unavailable: {}", XeFGInternal::Status());
+        _xefgError = XeFGError::Unavailable;
         _xefgFailed = true;
         return false;
     }
@@ -685,6 +731,7 @@ bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
     if (_device == nullptr)
     {
         LOG_ERROR("XeFG generator needs a device");
+        _xefgError = XeFGError::NoDevice;
         _xefgFailed = true;
         return false;
     }
@@ -700,6 +747,7 @@ bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
 
     if (!XeFGInternal::CreateContext(_device, &context))
     {
+        _xefgError = XeFGError::CreateContext;
         _xefgFailed = true;
         return false;
     }
@@ -718,6 +766,8 @@ bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
     {
         LOG_ERROR("XeFG Init failed: {} ({}x{}, format {})", result, desc.Width, desc.Height, (UINT) desc.Format);
         XeFGInternal::Destroy(context);
+        _xefgError = XeFGError::Init;
+        _xefgErrorCode = result;
         _xefgFailed = true;
         return false;
     }
@@ -729,6 +779,9 @@ bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
 
     LOG_INFO("XeFG generator created: {}x{}, format {}, up to {} generated frames", desc.Width, desc.Height,
              (UINT) desc.Format, maxCount);
+
+    _xefgError = XeFGError::None;
+    _xefgErrorCode = 0;
 
     return true;
 }
@@ -749,6 +802,11 @@ void FlipMeterFG_Dx12::ReleaseXeFG()
         DeferredRelease::Release(frame.hudless);
         frame = {};
     }
+
+    _xefgError = XeFGError::None;
+    _xefgErrorCode = 0;
+    _xefgGenerated = 0;
+    _xefgRequested = 0;
 
     _xefgOutputs.clear();
     _xefgBases.clear();
@@ -831,6 +889,9 @@ bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fInd
                                     ID3D12Resource* backbuffer, Dx12Resource* depth, Dx12Resource* velocity,
                                     Dx12Resource* hudless, bool useHudless)
 {
+    _xefgGenerated = 0;
+    _xefgRequested = count;
+
     if (!EnsureXeFG(backbuffer))
         return false;
 
@@ -842,7 +903,10 @@ bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fInd
         auto output = _proxy->GeneratedBuffer(i);
 
         if (output == nullptr)
+        {
+            _xefgError = XeFGError::Outputs;
             return false;
+        }
 
         _xefgOutputs[i] = output;
     }
@@ -874,6 +938,7 @@ bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fInd
     if (!captured)
     {
         frame.valid = false;
+        _xefgError = XeFGError::Capture;
         LOG_WARN("XeFG input capture failed");
         return false;
     }
@@ -930,6 +995,8 @@ bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fInd
         if (result < 0)
         {
             LOG_ERROR("XeFG Execute {} of {} failed: {}", i + 1, count, result);
+            _xefgError = XeFGError::Execute;
+            _xefgErrorCode = result;
             break;
         }
 
@@ -937,11 +1004,15 @@ bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fInd
         if (result > 0)
         {
             LOG_DEBUG("XeFG Execute {} of {} warning: {}", i + 1, count, result);
+            _xefgError = XeFGError::Execute;
+            _xefgErrorCode = result;
             break;
         }
 
         generated++;
     }
+
+    _xefgGenerated = generated;
 
     _proxy->SetGeneratedFrames(generated);
 
