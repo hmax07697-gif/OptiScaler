@@ -153,6 +153,10 @@ bool FlipMeterFG_Dx12::CreateProxy(IDXGIFactory* factory, ID3D12CommandQueue* cm
     _swapChain = proxy;
     _hwnd = hwnd;
 
+    // A new output may come with another size or generator, so XeFG gets built again on the next dispatch
+    _xefgFailed = false;
+    ReleaseXeFG();
+
     return true;
 }
 
@@ -218,7 +222,19 @@ void FlipMeterFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConst
     CreateObjects(device);
 }
 
-int FlipMeterFG_Dx12::ProviderMaxInterpolationCount() { return std::max(Nvngx_FG::getMaxFakeFramesCount(), 1); }
+bool FlipMeterFG_Dx12::UseXeFG()
+{
+    return Config::Instance()->FGFlipMeterGenerator.value_or_default() == FlipMeterGenerator::XeFG;
+}
+
+int FlipMeterFG_Dx12::ProviderMaxInterpolationCount()
+{
+    // XeFG's internal Init prepares for the count it is given, 5 generated frames is 6X
+    if (UseXeFG() && XeFGInternal::Load())
+        return 5;
+
+    return std::max(Nvngx_FG::getMaxFakeFramesCount(), 1);
+}
 
 int FlipMeterFG_Dx12::MaxInterpolationCount() const
 {
@@ -344,6 +360,12 @@ void FlipMeterFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConst
 
 void FlipMeterFG_Dx12::ReleaseFeature()
 {
+    if (UseXeFG())
+    {
+        ReleaseXeFG();
+        return;
+    }
+
     if (_handle != nullptr)
     {
         auto result = Nvngx_FG::D3D12_ReleaseFeature(_handle);
@@ -356,6 +378,9 @@ void FlipMeterFG_Dx12::ReleaseFeature()
 
 bool FlipMeterFG_Dx12::EnsureFeature(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* backbuffer)
 {
+    if (UseXeFG())
+        return EnsureXeFG(backbuffer);
+
     const auto desc = backbuffer->GetDesc();
     const bool changed = desc.Width != _featureWidth || desc.Height != _featureHeight || desc.Format != _featureFormat;
 
@@ -639,6 +664,295 @@ Dx12Resource FlipMeterFG_Dx12::FloatDepth(ID3D12GraphicsCommandList* cmdList, Dx
     return result;
 }
 
+// XeFG's unexported internal API: the generated frames are written into the proxy's generated buffers and the
+// proxy presents them with AMD's driver flip metering, so XeFG's own swap chain and pacer are never created.
+bool FlipMeterFG_Dx12::EnsureXeFG(ID3D12Resource* backbuffer)
+{
+    if (_xefgFailed)
+        return false;
+
+    if (!XeFGInternal::Load())
+    {
+        LOG_WARN("XeFG generator unavailable: {}", XeFGInternal::Status());
+        _xefgFailed = true;
+        return false;
+    }
+
+    const auto desc = backbuffer->GetDesc();
+
+    if (_xefgContext != nullptr && _xefgWidth == desc.Width && _xefgHeight == desc.Height && _xefgFormat == desc.Format)
+        return true;
+
+    ReleaseXeFG();
+
+    if (_device == nullptr)
+    {
+        LOG_ERROR("XeFG generator needs a device");
+        _xefgFailed = true;
+        return false;
+    }
+
+    // The context is built for the largest count it can generate, the per frame calls use what they need.
+    // Init would pick the multi frame network for counts above 1, which the dll doesn't contain, so the default
+    // network is forced like dlssg-to-xefg does. Both are process wide and have to precede CreateContext.
+    const auto maxCount = (uint32_t) ProviderMaxInterpolationCount();
+    XeFGInternal::SetMaxInterpolatedFrames(maxCount);
+    XeFGInternal::SetModel(XeFGInternal::DEFAULT_MODEL);
+
+    void* context = nullptr;
+
+    if (!XeFGInternal::CreateContext(_device, &context))
+    {
+        _xefgFailed = true;
+        return false;
+    }
+
+    XeFGInternal::InitParams params {};
+    params.outputResolution = { (uint32_t) desc.Width, (uint32_t) desc.Height };
+    params.backBufferFormat = (uint32_t) desc.Format;
+    params.initFlags = (IsInvertedDepth() ? XeFGInternal::INIT_FLAG_INVERTED_DEPTH : 0) |
+                       (IsJitteredMVs() ? XeFGInternal::INIT_FLAG_JITTERED_MV : 0);
+    params.maxInterpolatedFrames = maxCount;
+    params.uiMode = XeFGInternal::UI_MODE_BACKBUFFER_HUDLESS;
+
+    auto result = XeFGInternal::Init(context, params);
+
+    if (result != XeFGInternal::RESULT_SUCCESS)
+    {
+        LOG_ERROR("XeFG Init failed: {} ({}x{}, format {})", result, desc.Width, desc.Height, (UINT) desc.Format);
+        XeFGInternal::Destroy(context);
+        _xefgFailed = true;
+        return false;
+    }
+
+    _xefgContext = context;
+    _xefgWidth = desc.Width;
+    _xefgHeight = desc.Height;
+    _xefgFormat = desc.Format;
+
+    LOG_INFO("XeFG generator created: {}x{}, format {}, up to {} generated frames", desc.Width, desc.Height,
+             (UINT) desc.Format, maxCount);
+
+    return true;
+}
+
+void FlipMeterFG_Dx12::ReleaseXeFG()
+{
+    if (_xefgContext != nullptr)
+    {
+        XeFGInternal::Destroy(_xefgContext);
+        _xefgContext = nullptr;
+    }
+
+    for (auto& frame : _xefgFrames)
+    {
+        DeferredRelease::Release(frame.color);
+        DeferredRelease::Release(frame.depth);
+        DeferredRelease::Release(frame.mvec);
+        DeferredRelease::Release(frame.hudless);
+        frame = {};
+    }
+
+    _xefgOutputs.clear();
+    _xefgBases.clear();
+    _xefgWidth = 0;
+    _xefgHeight = 0;
+    _xefgFormat = DXGI_FORMAT_UNKNOWN;
+    _xefgCurrent = 0;
+}
+
+// Depth formats can't be sampled, the copy is the same bits as a typed color format
+static bool CreateXeFGDepthCopy(ID3D12Device* device, ID3D12Resource* source, ID3D12Resource** target)
+{
+    auto desc = source->GetDesc();
+    desc.Flags &= ~(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+
+    switch (desc.Format)
+    {
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT:
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        break;
+
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+        desc.Format = DXGI_FORMAT_R16_UNORM;
+        break;
+
+    default:
+        break;
+    }
+
+    if (*target != nullptr)
+    {
+        auto existing = (*target)->GetDesc();
+
+        if (existing.Width == desc.Width && existing.Height == desc.Height && existing.Format == desc.Format)
+            return true;
+
+        DeferredRelease::Release(*target);
+    }
+
+    D3D12_HEAP_PROPERTIES heap {};
+    D3D12_HEAP_FLAGS heapFlags {};
+
+    if (FAILED(source->GetHeapProperties(&heap, &heapFlags)))
+        return false;
+
+    return SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                                     IID_PPV_ARGS(target)));
+}
+
+// The game reuses its back buffer, XeFG reads the frame it interpolates from on the next one
+bool FlipMeterFG_Dx12::CaptureXeFG(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
+                                   D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target, bool depth)
+{
+    if (source == nullptr || target == nullptr)
+        return false;
+
+    // XeFG reads its inputs as non pixel shader resources, the copies are left in that state
+    const bool created = depth ? CreateXeFGDepthCopy(_device, source, target)
+                               : CreateBufferResource(_device, source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                      target);
+
+    if (!created)
+        return false;
+
+    ResourceBarrier(cmdList, *target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+    ResourceBarrier(cmdList, source, sourceState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyResource(*target, source);
+    ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceState);
+    ResourceBarrier(cmdList, *target, D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    return true;
+}
+
+bool FlipMeterFG_Dx12::DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fIndex, UINT count,
+                                    ID3D12Resource* backbuffer, Dx12Resource* depth, Dx12Resource* velocity,
+                                    Dx12Resource* hudless, bool useHudless)
+{
+    if (!EnsureXeFG(backbuffer))
+        return false;
+
+    _xefgOutputs.resize(count);
+    _xefgBases.resize(count, XeFGInternal::Point2D { 0, 0 });
+
+    for (UINT i = 0; i < count; i++)
+    {
+        auto output = _proxy->GeneratedBuffer(i);
+
+        if (output == nullptr)
+            return false;
+
+        _xefgOutputs[i] = output;
+    }
+
+    const auto backbufferDesc = backbuffer->GetDesc();
+
+    // The camera matrices come from the same inputs the Nvngx path builds its parameters from
+    SetFrameParameters(fIndex, backbuffer, depth, velocity, hudless);
+
+    // The new frame becomes current, the one before it is what XeFG interpolates from
+    _xefgCurrent ^= 1;
+    auto& frame = _xefgFrames[_xefgCurrent];
+    auto& previous = _xefgFrames[_xefgCurrent ^ 1];
+
+    auto depthInput = FloatDepth(cmdList, *depth);
+
+    const auto depthDesc = depthInput.GetResource()->GetDesc();
+    const auto velocityDesc = velocity->GetResource()->GetDesc();
+
+    bool captured = CaptureXeFG(cmdList, backbuffer, D3D12_RESOURCE_STATE_PRESENT, &frame.color);
+    captured = captured && CaptureXeFG(cmdList, depthInput.GetResource(), depthInput.state, &frame.depth, true);
+    captured = captured && CaptureXeFG(cmdList, velocity->GetResource(), velocity->state, &frame.mvec);
+
+    if (useHudless && hudless != nullptr)
+        captured = captured && CaptureXeFG(cmdList, hudless->GetResource(), hudless->state, &frame.hudless);
+    else
+        DeferredRelease::Release(frame.hudless);
+
+    if (!captured)
+    {
+        frame.valid = false;
+        LOG_WARN("XeFG input capture failed");
+        return false;
+    }
+
+    frame.data = {};
+    frame.data.backBuffer = { frame.color, { 0, 0 }, { (uint32_t) backbufferDesc.Width, backbufferDesc.Height } };
+    frame.data.depth = { frame.depth, { 0, 0 }, { (uint32_t) depthDesc.Width, depthDesc.Height } };
+    frame.data.motionVectors = { frame.mvec, { 0, 0 }, { (uint32_t) velocityDesc.Width, velocityDesc.Height } };
+
+    if (frame.hudless != nullptr)
+    {
+        const auto hudlessDesc = frame.hudless->GetDesc();
+        frame.data.hudlessColor = { frame.hudless, { 0, 0 }, { (uint32_t) hudlessDesc.Width, hudlessDesc.Height } };
+    }
+
+    // An all zero view matrix turns XeFG's scene change detection off, its projection comes from the inputs
+    memset(frame.data.viewMatrix, 0, sizeof(frame.data.viewMatrix));
+    memcpy(frame.data.projectionMatrix, _cameraViewToClip, sizeof(frame.data.projectionMatrix));
+
+    frame.data.outputResolution[0] = (float) backbufferDesc.Width;
+    frame.data.outputResolution[1] = (float) backbufferDesc.Height;
+    frame.data.jitterOffset[0] = _jitterX[fIndex];
+    frame.data.jitterOffset[1] = _jitterY[fIndex];
+    frame.data.motionVectorScale[0] = _mvScaleX[fIndex] == 0.0f ? 1.0f : _mvScaleX[fIndex];
+    frame.data.motionVectorScale[1] = _mvScaleY[fIndex] == 0.0f ? 1.0f : _mvScaleY[fIndex];
+    frame.data.resetHistory = _reset[fIndex] != 0 && !Config::Instance()->FGSkipReset.value_or_default() ? 1 : 0;
+    frame.valid = true;
+
+    // XeFG needs both frames of a pair, and either both or neither with a hudless image
+    const bool pair = previous.valid && frame.data.resetHistory == 0 &&
+                      (previous.hudless != nullptr) == (frame.hudless != nullptr);
+
+    if (!pair)
+        return false;
+
+    XeFGInternal::ExecParams params {};
+    params.prev = previous.data;
+    params.next = frame.data;
+    params.ppOutputs = _xefgOutputs.data();
+    params.pOutputBases = _xefgBases.data();
+    params.numInterpolatedFrames = (uint8_t) count;
+    params.uiCompositionEnabled = frame.hudless != nullptr ? 1u : 0u;
+
+    UINT generated = 0;
+
+    for (UINT i = 0; i < count; i++)
+    {
+        // The first frame of a pair runs the per pair work, the rest only generate their own frame
+        params.firstFrameIndex = i;
+        params.frameCount = 1;
+
+        auto result = XeFGInternal::Execute(_xefgContext, cmdList, params);
+
+        if (result < 0)
+        {
+            LOG_ERROR("XeFG Execute {} of {} failed: {}", i + 1, count, result);
+            break;
+        }
+
+        // Warnings like differing input areas, the frame is not usable
+        if (result > 0)
+        {
+            LOG_DEBUG("XeFG Execute {} of {} warning: {}", i + 1, count, result);
+            break;
+        }
+
+        generated++;
+    }
+
+    _proxy->SetGeneratedFrames(generated);
+
+    LOG_DEBUG("XeFG generated {} of {}", generated, count);
+
+    return generated > 0;
+}
+
 bool FlipMeterFG_Dx12::Dispatch(int fIndex)
 {
     if (_proxy == nullptr || !IsActive() || IsPaused())
@@ -691,7 +1005,14 @@ bool FlipMeterFG_Dx12::Dispatch(int fIndex)
 
     auto cmdList = GetSCCommandList(fIndex);
 
-    if (cmdList == nullptr || !EnsureFeature(cmdList, backbuffer))
+    if (cmdList == nullptr)
+        return false;
+
+    if (UseXeFG())
+        return DispatchXeFG(cmdList, fIndex, count, backbuffer, &*depth, &*velocity, useHudless ? &*hudless : nullptr,
+                            useHudless);
+
+    if (!EnsureFeature(cmdList, backbuffer))
         return false;
 
     auto depthInput = FloatDepth(cmdList, *depth);

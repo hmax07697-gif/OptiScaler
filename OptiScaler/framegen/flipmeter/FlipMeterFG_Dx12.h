@@ -1,9 +1,12 @@
 #pragma once
 
 #include <framegen/IFGFeature_Dx12.h>
+#include <framegen/xefg/XeFGInternal.h>
 
 #include <NVNGX_Parameter.h>
 #include <shaders/format_transfer/FT_Dx12.h>
+
+#include <vector>
 
 class FlipMeterSwapChain;
 
@@ -49,6 +52,37 @@ class FlipMeterFG_Dx12 : public virtual IFGFeature_Dx12
     // nothing gets generated or metered until they come back
     static constexpr UINT IdleAfterFrames = 4;
     UINT _framesWithoutInputs = 0;
+
+    // XeFG's unexported internal API as the frame source instead of the Nvngx replacement ([FlipMeter] Generator)
+    static bool UseXeFG();
+
+    // One captured real frame, XeFG reads the previous one to interpolate towards the current one
+    struct XeFGFrame
+    {
+        ID3D12Resource* color = nullptr;
+        ID3D12Resource* depth = nullptr;
+        ID3D12Resource* mvec = nullptr;
+        ID3D12Resource* hudless = nullptr;
+        XeFGInternal::Frame data {};
+        bool valid = false;
+    };
+
+    void* _xefgContext = nullptr;
+    bool _xefgFailed = false;
+    UINT64 _xefgWidth = 0;
+    UINT _xefgHeight = 0;
+    DXGI_FORMAT _xefgFormat = DXGI_FORMAT_UNKNOWN;
+    std::vector<ID3D12Resource*> _xefgOutputs;
+    std::vector<XeFGInternal::Point2D> _xefgBases;
+    XeFGFrame _xefgFrames[2];
+    UINT _xefgCurrent = 0;
+
+    bool EnsureXeFG(ID3D12Resource* backbuffer);
+    void ReleaseXeFG();
+    bool CaptureXeFG(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source, D3D12_RESOURCE_STATES sourceState,
+                     ID3D12Resource** target, bool depth = false);
+    bool DispatchXeFG(ID3D12GraphicsCommandList* cmdList, int fIndex, UINT count, ID3D12Resource* backbuffer,
+                      Dx12Resource* depth, Dx12Resource* velocity, Dx12Resource* hudless, bool useHudless);
 
     // Generated frames per game frame the output currently aims for
     UINT TargetCount() const;

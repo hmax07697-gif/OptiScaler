@@ -764,6 +764,8 @@ class Config
 
     // Flip Meter
     CustomOptional<int> FGFlipMeterInterpolationCount { 1 };
+    // Frame source of the Flip Meter output, the Nvngx replacement by default
+    CustomOptional<FlipMeterGenerator> FGFlipMeterGenerator { FlipMeterGenerator::Nvngx };
     // Reprojection
     CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::Dithering };
     CustomOptional<float> ReprojectionDepthCutoff { 0.1f };

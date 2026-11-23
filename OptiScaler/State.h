@@ -80,6 +80,23 @@ template <> struct EnumConfig<FGOutput>
     };
 };
 
+// Frame source of the Flip Meter output
+enum class FlipMeterGenerator : uint32_t
+{
+    Nvngx, // the selected FG Nvngx Replacement
+    XeFG,  // XeFG's unexported internal API, presented by the same proxy
+};
+
+template <> struct EnumConfig<FlipMeterGenerator>
+{
+    static constexpr auto default_value = FlipMeterGenerator::Nvngx;
+
+    static constexpr std::pair<FlipMeterGenerator, std::string_view> mapping[] = {
+        { FlipMeterGenerator::Nvngx, "Nvngx" },
+        { FlipMeterGenerator::XeFG, "XeFG" },
+    };
+};
+
 enum class FGNvngxReplacement : uint32_t
 {
     None,

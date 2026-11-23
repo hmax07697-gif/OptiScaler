@@ -244,6 +244,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (FGFlipMeterInterpolationCount.has_value() &&
                 (FGFlipMeterInterpolationCount.value() < 1 || FGFlipMeterInterpolationCount.value() > 5))
                 FGFlipMeterInterpolationCount.reset();
+
+            FGFlipMeterGenerator.set_from_config(
+                readString("FlipMeter", "Generator").transform(CodeToEnum<enum FlipMeterGenerator>));
         }
 
         {
@@ -1502,6 +1505,12 @@ bool Config::SaveIni()
     {
         ini.SetValue("FlipMeter", "InterpolationCount",
                      GetIntValue(Instance()->FGFlipMeterInterpolationCount.value_for_config()).c_str());
+        ini.SetValue("FlipMeter", "Generator",
+                     Instance()
+                         ->FGFlipMeterGenerator.value_for_config()
+                         .transform(EnumToCode<FlipMeterGenerator>)
+                         .value_or("auto")
+                         .c_str());
     }
 
     {
